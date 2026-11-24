@@ -16,19 +16,45 @@
 
 ## 如何部署
 
-以下是部署 Cloudflare Workers 反向代理脚本的详细步骤：
+三种方式任选其一，仓库里已经带了 `wrangler.toml` 和 `package.json`，不用再手动粘贴代码。
 
-1. 注册 Cloudflare 账户：如果您尚未拥有 Cloudflare 账户，请在 [Cloudflare 官方网站](https://www.cloudflare.com/) 上注册一个账户。
+### 方式一：一键部署（推荐）
 
-2. 创建 Workers 脚本：登录到 Cloudflare 账户后，进入 "Workers" 部分，创建一个新的 Workers 脚本。
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/HDYOU/cloudflare-workers-proxy)
 
-3. 复制[worker.js](worker.js)：将提供的反向代理脚本粘贴到 Workers 编辑器中。
+点上面的按钮 → 授权 GitHub → Cloudflare 自动建仓库、装依赖、跑 `wrangler deploy`，一分钟拿到 `https://cloudflare-workers-proxy.<你的子域>.workers.dev`，之后每次 push 到 `main` 都会自动重新部署。
 
-4. 保存并部署：保存脚本后，点击 "Deploy" 按钮，以部署您的 Workers 脚本。
+### 方式二：命令行 wrangler
 
-5. 配置域名：在 Cloudflare 中，将您的域名与部署的 Workers 脚本关联。确保将流量路由到您的 Workers 脚本。
+```bash
+git clone https://github.com/HDYOU/cloudflare-workers-proxy.git
+cd cloudflare-workers-proxy
+npm install
+npx wrangler login        # 浏览器里点一下授权
+npm run dev               # 本地 http://localhost:8787 调试
+npm run deploy            # 发布到 Cloudflare
+```
 
-6. 测试：访问您的域名或者 Cloudflare Workers URL 会看到一个输入框，您可以在其中输入要代理的目标网站的 URL，然后点击 "进入代理" 按钮进行访问。
+部署成功后域名形如 `https://cloudflare-workers-proxy.<你的子域>.workers.dev`。
+
+### 方式三：控制台粘贴
+
+登录 Cloudflare → Workers & Pages → Create → Worker，把 [worker.js](worker.js) 的内容整段粘进编辑器（**注意**：必须以 `export default` 的 ES Module 形式保存，旧的 `addEventListener` 写法已经不能新建 Worker 了），然后 Deploy。
+
+### 自定义域名 / 路由
+
+编辑 `wrangler.toml` 取消注释这一行，或在控制台 Workers → Settings → Domains & Routes 里绑定：
+
+```toml
+routes = [{ pattern = "proxy.example.com", custom_domain = true }]
+```
+
+### 本地测试与单测
+
+```bash
+npm run dev     # 本地起服务
+npm test        # 7 项单测：URL 补协议、相对路径改写、重定向、头过滤、根页面
+```
 
 ## 使用方法
 
@@ -51,6 +77,15 @@
 4. 用户友好界面
 
    如果您未提供目标网站的 URL，此反向代理还提供了一个用户友好的界面。用户可以在此界面中输入目标网站的 URL，然后点击 "进入代理" 按钮，以便快速代理访问目标网站。
+
+## 相对原脚本的改动
+
+为了能真正用 wrangler / 一键部署跑起来，本仓库对 `worker.js` 做了几处必要修正：
+
+- 入口从 `addEventListener('fetch')` 改为 `export default { fetch }`（Cloudflare 已不再支持新建 Service Worker 语法的 Worker）。
+- 转发请求时剔除 `accept-encoding`、`host`、`content-length`、`connection` 等头。原脚本会把 `accept-encoding` 原样转发，导致 Workers 不再自动解压，返回的 HTML 变成乱码压缩流，相对路径改写也就失效了。
+- 重定向处理：原来的 `new URL(location)` 遇到相对 Location 会抛错，且 `{ ...response.headers }` 展开 `Headers` 对象其实是空对象（响应头全丢）。现在改为基于实际请求 URL 解析相对地址，并用 `new Headers()` 复制原响应头。
+- 新增 `wrangler.toml`、`package.json`（`dev` / `deploy` 脚本）、`.gitignore` 和 `test/worker.test.mjs`。
 
 ## 注意事项
 

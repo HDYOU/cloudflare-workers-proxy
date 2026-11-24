@@ -1,0 +1,16 @@
+{
+  "name": "cloudflare-workers-proxy",
+  "private": true,
+  "version": "1.0.0",
+  "description": "把任意站点反代到 Cloudflare Workers 的脚本，支持 wrangler / 一键部署",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "node --test test/worker.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.167.0"
+  }
+}

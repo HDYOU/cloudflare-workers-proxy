@@ -1,0 +1,7 @@
+# Cloudflare Workers 部署配置：wrangler deploy 或 Git 集成都会读这个文件
+name = "cloudflare-workers-proxy"
+main = "worker.js"
+compatibility_date = "2025-11-01"
+
+# 可选：绑定自定义域名后在此填写
+# routes = [{ pattern = "proxy.example.com", custom_domain = true }]

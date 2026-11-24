@@ -1,6 +1,10 @@
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request));
-});
+// Cloudflare Workers 现在只支持 ES Module 写法；旧的 addEventListener 格式无法用
+// wrangler / 一键部署上线，这里改成 export default { fetch }。
+export default {
+  async fetch(request) {
+    return handleRequest(request);
+  },
+};
 
 async function handleRequest(request) {
   try {
@@ -24,8 +28,8 @@ async function handleRequest(request) {
       // 保留查询参数
       actualUrlStr += url.search;
 
-      // 创建新 Headers 对象，排除以 'cf-' 开头的请求头
-      const newHeaders = filterHeaders(request.headers, name => !name.startsWith('cf-'));
+      // 创建新 Headers 对象：丢掉 cf- 前缀头，以及会导致 Workers 无法自动解压/改写的头
+      const newHeaders = filterHeaders(request.headers, name => !shouldDropHeader(name));
 
       // 创建一个新的请求以访问目标 URL
       const modifiedRequest = new Request(actualUrlStr, {
@@ -41,9 +45,7 @@ async function handleRequest(request) {
 
       // 处理重定向
       if ([301, 302, 303, 307, 308].includes(response.status)) {
-          body = response.body;
-          // 创建新的 Response 对象以修改 Location 头部
-          return handleRedirect(response, body);
+          return handleRedirect(response, response.body, actualUrlStr);
       } else if (response.headers.get("Content-Type")?.includes("text/html")) {
           body = await handleHtmlContent(response, url.protocol, url.host, actualUrlStr);
       }
@@ -54,6 +56,10 @@ async function handleRequest(request) {
           statusText: response.statusText,
           headers: response.headers
       });
+
+      // 内容可能被改写（HTML 相对路径），长度和编码交给 Workers 重新计算
+      modifiedResponse.headers.delete('content-length');
+      modifiedResponse.headers.delete('content-encoding');
 
       // 添加禁用缓存的头部
       setNoCacheHeaders(modifiedResponse.headers);
@@ -75,27 +81,30 @@ function ensureProtocol(url, defaultProtocol) {
   return url.startsWith("http://") || url.startsWith("https://") ? url : defaultProtocol + "//" + url;
 }
 
-// 处理重定向
-function handleRedirect(response, body) {
-  const location = new URL(response.headers.get('location'));
-  const modifiedLocation = `/${encodeURIComponent(location.toString())}`;
+// 处理重定向：把目标站的 Location 改写成「代理前缀 + 原始地址」的形式
+function handleRedirect(response, body, actualUrlStr) {
+  const rawLocation = response.headers.get('location');
+  const headers = new Headers(response.headers);
+  if (rawLocation) {
+    let absolute;
+    try {
+      absolute = new URL(rawLocation, actualUrlStr).toString();
+    } catch {
+      absolute = rawLocation;
+    }
+    headers.set('Location', `/${encodeURIComponent(absolute)}`);
+  }
   return new Response(body, {
       status: response.status,
       statusText: response.statusText,
-      headers: {
-          ...response.headers,
-          'Location': modifiedLocation
-      }
+      headers
   });
 }
 
 // 处理 HTML 内容中的相对路径
 async function handleHtmlContent(response, protocol, host, actualUrlStr) {
   const originalText = await response.text();
-  const regex = new RegExp('((href|src|action)=["\'])/(?!/)', 'g');
-  let modifiedText = replaceRelativePaths(originalText, protocol, host, new URL(actualUrlStr).origin);
-
-  return modifiedText;
+  return replaceRelativePaths(originalText, protocol, host, new URL(actualUrlStr).origin);
 }
 
 // 替换 HTML 内容中的相对路径
@@ -117,6 +126,26 @@ function jsonResponse(data, status) {
 // 过滤请求头
 function filterHeaders(headers, filterFunc) {
   return new Headers([...headers].filter(([name]) => filterFunc(name)));
+}
+
+// 这些请求头不能转发给目标站：
+// - cf-* : Cloudflare 内部头
+// - accept-encoding : 转发后 Workers 不再自动解压，响应会变成无法处理的压缩流
+// - host / content-length / connection 等 : 由 fetch 重新计算，转发会报错或错乱
+const DROPPED_HEADERS = new Set([
+  'accept-encoding',
+  'host',
+  'content-length',
+  'connection',
+  'keep-alive',
+  'proxy-connection',
+  'transfer-encoding',
+  'upgrade',
+]);
+
+function shouldDropHeader(name) {
+  const lower = name.toLowerCase();
+  return lower.startsWith('cf-') || DROPPED_HEADERS.has(lower);
 }
 
 // 设置禁用缓存的头部
@@ -244,3 +273,14 @@ function getRootHtml() {
 </body>
 </html>`;
 }
+
+// 导出纯函数，供 test/worker.test.mjs 单测
+export {
+  ensureProtocol,
+  filterHeaders,
+  handleRedirect,
+  replaceRelativePaths,
+  setCorsHeaders,
+  setNoCacheHeaders,
+  shouldDropHeader,
+};
