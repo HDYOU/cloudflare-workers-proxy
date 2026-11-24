@@ -13,6 +13,7 @@
 - 修改响应中的相对路径为绝对路径，以确保资源的正确加载。
 - 处理重定向并进行适当的修改，以保持资源路径的正确性。
 - 添加 CORS 头部，以允许跨域访问。
+- 支持 WebSocket（`wss://` / `ws://`）透传，文本帧和二进制帧都原样转发。
 
 ## 如何部署
 
@@ -74,6 +75,25 @@ npm test        # 7 项单测：URL 补协议、相对路径改写、重定向�
 
    反向代理添加了 CORS（跨源资源共享）头部，以允许跨域请求。这意味着您可以在前端 JavaScript 代码中从不同域（不同域名）发起请求，而不会受到浏览器的跨域安全限制。
 
+5. WebSocket 代理
+
+   把目标 WebSocket 地址拼在工作域名后面即可，`wss://`、`ws://` 都认（`ws://` 会被映射成 `http://` 去握手，`wss://` 映射成 `https://`）：
+
+   ```js
+   // 目标：wss://echo.example.com/socket
+   const ws = new WebSocket('wss://your-worker.workers.dev/wss://echo.example.com/socket');
+   ws.onmessage = (e) => console.log(e.data);
+   ws.send('hello');
+   ```
+
+   也可以用编码形式，两者等价：
+
+   ```js
+   new WebSocket('wss://your-worker.workers.dev/' + encodeURIComponent('wss://echo.example.com/socket'));
+   ```
+
+   握手成功后 Workers 会把双向消息透传给目标站，脚本不读取、不改写任何帧内容；连接断开、错误码都由两端原生行为决定。
+
 4. 用户友好界面
 
    如果您未提供目标网站的 URL，此反向代理还提供了一个用户友好的界面。用户可以在此界面中输入目标网站的 URL，然后点击 "进入代理" 按钮，以便快速代理访问目标网站。
@@ -86,8 +106,13 @@ npm test        # 7 项单测：URL 补协议、相对路径改写、重定向�
 - 转发请求时剔除 `accept-encoding`、`host`、`content-length`、`connection` 等头。原脚本会把 `accept-encoding` 原样转发，导致 Workers 不再自动解压，返回的 HTML 变成乱码压缩流，相对路径改写也就失效了。
 - 重定向处理：原来的 `new URL(location)` 遇到相对 Location 会抛错，且 `{ ...response.headers }` 展开 `Headers` 对象其实是空对象（响应头全丢）。现在改为基于实际请求 URL 解析相对地址，并用 `new Headers()` 复制原响应头。
 - 新增 `wrangler.toml`、`package.json`（`dev` / `deploy` 脚本）、`.gitignore` 和 `test/worker.test.mjs`。
+- 新增 WebSocket 代理：检测 `Upgrade: websocket` 后走独立分支，把 `ws://`/`wss://` 映射成 `http://`/`https://` 去握手，返回 `101` 并把 `response.webSocket` 交给客户端；同时过滤 `sec-websocket-key` 等握手头（由 Workers 自己生成，转发会握手失败）。
 
 ## 注意事项
+
+- WebSocket 不计时长，但每次握手算一次 Worker 请求，免费版仍是 10 万请求/天。
+- 只做透传：脚本不理解业务消息，也不会替你做重连、鉴权或心跳。
+
 
 - 请确保部署的 Workers 脚本在部署时是有效的，并且有足够的资源来处理请求。
 

@@ -22,7 +22,7 @@ async function handleRequest(request) {
       // 从请求路径中提取目标 URL
       let actualUrlStr = decodeURIComponent(url.pathname.replace("/", ""));
 
-      // 判断用户输入的 URL 是否带有协议
+      // 判断用户输入的 URL 是否带有协议（ws/wss 需要映射成 http/https 才能 fetch）
       actualUrlStr = ensureProtocol(actualUrlStr, url.protocol);
 
       // 保留查询参数
@@ -30,6 +30,11 @@ async function handleRequest(request) {
 
       // 创建新 Headers 对象：丢掉 cf- 前缀头，以及会导致 Workers 无法自动解压/改写的头
       const newHeaders = filterHeaders(request.headers, name => !shouldDropHeader(name));
+
+      // WebSocket 升级请求走单独的通道，不能套用 HTTP 改写逻辑
+      if (isWebSocketRequest(request)) {
+          return handleWebSocket(newHeaders, actualUrlStr);
+      }
 
       // 创建一个新的请求以访问目标 URL
       const modifiedRequest = new Request(actualUrlStr, {
@@ -76,9 +81,48 @@ async function handleRequest(request) {
   }
 }
 
-// 确保 URL 带有协议
+// 确保 URL 带有协议；接受 http/https/ws/wss 四种
+const HAS_PROTOCOL = /^(https?|wss?):\/\//i;
+
 function ensureProtocol(url, defaultProtocol) {
-  return url.startsWith("http://") || url.startsWith("https://") ? url : defaultProtocol + "//" + url;
+  return HAS_PROTOCOL.test(url) ? url : defaultProtocol + "//" + url;
+}
+
+// ws:// → http://，wss:// → https://（Workers 的 fetch 只能发 HTTP(S) 请求）
+function toUpstreamUrl(urlStr) {
+  if (/^ws:\/\//i.test(urlStr)) return "http://" + urlStr.slice(5);
+  if (/^wss:\/\//i.test(urlStr)) return "https://" + urlStr.slice(6);
+  return urlStr;
+}
+
+function isWebSocketRequest(request) {
+  return (request.headers.get("upgrade") || "").toLowerCase() === "websocket";
+}
+
+// WebSocket 代理：把连接透传到目标站，握手成功后交给 Workers 双向转发
+async function handleWebSocket(headers, targetUrl) {
+  const wsHeaders = new Headers(headers);
+  wsHeaders.set("upgrade", "websocket");
+
+  let response;
+  try {
+    response = await fetch(toUpstreamUrl(targetUrl), {
+      headers: wsHeaders,
+      method: "GET",
+      redirect: "manual",
+    });
+  } catch (error) {
+    return jsonResponse({ error: error.message }, 502);
+  }
+
+  if (response.status !== 101 || !response.webSocket) {
+    return jsonResponse(
+      { error: "websocket handshake failed", upstreamStatus: response.status },
+      502
+    );
+  }
+
+  return new Response(null, { status: 101, webSocket: response.webSocket });
 }
 
 // 处理重定向：把目标站的 Location 改写成「代理前缀 + 原始地址」的形式
@@ -141,6 +185,11 @@ const DROPPED_HEADERS = new Set([
   'proxy-connection',
   'transfer-encoding',
   'upgrade',
+  // Workers 自己完成 WebSocket 握手，转发这些头会握手失败
+  'sec-websocket-key',
+  'sec-websocket-version',
+  'sec-websocket-extensions',
+  'sec-websocket-accept',
 ]);
 
 function shouldDropHeader(name) {
@@ -278,6 +327,9 @@ function getRootHtml() {
 export {
   ensureProtocol,
   filterHeaders,
+  handleWebSocket,
+  isWebSocketRequest,
+  toUpstreamUrl,
   handleRedirect,
   replaceRelativePaths,
   setCorsHeaders,

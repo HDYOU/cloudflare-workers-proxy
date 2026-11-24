@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import worker, {
   ensureProtocol,
   filterHeaders,
+  handleWebSocket,
+  isWebSocketRequest,
+  toUpstreamUrl,
   shouldDropHeader,
   handleRedirect,
   replaceRelativePaths,
@@ -75,4 +78,68 @@ test('根路径返回带表单的 HTML 页面', async () => {
   const html = await res.text();
   assert.ok(html.includes('Proxy Everything'));
   assert.ok(html.includes('id="targetUrl"'));
+});
+
+test('ensureProtocol 支持 ws / wss', () => {
+  assert.equal(ensureProtocol('wss://echo.example.com/ws', 'https:'), 'wss://echo.example.com/ws');
+  assert.equal(ensureProtocol('ws://echo.example.com/ws', 'https:'), 'ws://echo.example.com/ws');
+});
+
+test('toUpstreamUrl 把 ws/wss 映射成 http/https', () => {
+  assert.equal(toUpstreamUrl('ws://a.com/s'), 'http://a.com/s');
+  assert.equal(toUpstreamUrl('wss://a.com/s?x=1'), 'https://a.com/s?x=1');
+  assert.equal(toUpstreamUrl('https://a.com/s'), 'https://a.com/s');
+});
+
+test('isWebSocketRequest 识别 Upgrade: websocket', () => {
+  const ws = new Request('https://p.com/wss%3A%2F%2Fa.com%2Fs', { headers: { upgrade: 'websocket' } });
+  const http = new Request('https://p.com/https%3A%2F%2Fa.com%2F');
+  assert.equal(isWebSocketRequest(ws), true);
+  assert.equal(isWebSocketRequest(http), false);
+});
+
+test('handleWebSocket 握手成功返回 101 + socket', async () => {
+  // Node 的 Response 不允许 status 101，这里用假 Response 记录构造参数
+  const OriginalResponse = globalThis.Response;
+  const OriginalFetch = globalThis.fetch;
+  const calls = [];
+  let builtInit = null;
+
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, headers: init.headers });
+    return { status: 101, webSocket: { fake: true } };
+  };
+  globalThis.Response = class {
+    constructor(body, init) {
+      builtInit = init;
+      this.status = init.status;
+      this.webSocket = init.webSocket;
+    }
+  };
+
+  try {
+    const res = await handleWebSocket(new Headers({ 'user-agent': 'ua/1' }), 'wss://echo.example.com/ws');
+    assert.equal(res.status, 101);
+    assert.deepEqual(res.webSocket, { fake: true });
+    assert.equal(builtInit.status, 101);
+    assert.equal(calls[0].url, 'https://echo.example.com/ws');
+    assert.equal(calls[0].headers.get('upgrade'), 'websocket');
+    assert.equal(calls[0].headers.get('user-agent'), 'ua/1');
+  } finally {
+    globalThis.fetch = OriginalFetch;
+    globalThis.Response = OriginalResponse;
+  }
+});
+
+test('handleWebSocket 握手失败返回 502', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({ status: 200, webSocket: null });
+  try {
+    const res = await handleWebSocket(new Headers(), 'wss://echo.example.com/ws');
+    assert.equal(res.status, 502);
+    const body = await res.json();
+    assert.equal(body.error, 'websocket handshake failed');
+  } finally {
+    globalThis.fetch = original;
+  }
 });
